@@ -57,8 +57,7 @@ df['acceleration']    = df['roc_10min'].diff(1)
 feature_cols = ['roc_10min','roc_30min','rolling_std_30','delta_thermal_gap','acceleration']
 df_m = df.dropna(subset=feature_cols).copy()
 
-# 4. TRAIN / TEST SPLIT (Chronological 70/30)
-# =====================================================================
+# 4. TRAIN / TEST SPLIT ( 70/30)
 print("Splitting dataset into Train (70%) and Test (30%) phases...")
 split_idx = int(len(df_m) * 0.7)
 df_train = df_m.iloc[:split_idx].copy()
@@ -67,9 +66,8 @@ split_date = df_test['timestamp'].iloc[0]
 
 print(f"Train Set: {len(df_train)} records (Ends at {split_date})")
 print(f"Test Set : {len(df_test)} records (Starts at {split_date})")
-# =====================================================================
 
-# 5. SCALING (Fit ONLY on Train, Transform on Both to prevent Data Leakage)
+# 5. SCALING (Fit ONLY)
 print("Applying scalers...")
 rs = RobustScaler()
 ss = StandardScaler()
@@ -88,7 +86,7 @@ spikes_standard = (np.abs(X_standard) > 3).sum(axis=1)
 print(f"Spikes preserved (RobustScaler): {(spikes_robust>0).sum()}")
 print(f"Spikes preserved (StandardScaler): {(spikes_standard>0).sum()}")
 
-# 6. ISOLATION FOREST (Train ONLY on Train Set)
+# 6. ISOLATION FOREST (Train ONLY  Train Set)
 print("Training Isolation Forest on Train set...")
 iforest = IsolationForest(
     n_estimators   = 200,
