@@ -1,6 +1,6 @@
 # Thesis Project: Anomaly Detection on IoT Temperature Data
 # Author: Dimitris Kostoulas
-# Description: Resampling, Feature Engineering, and Isolation Forest evaluation
+# Description: Resampling, Feature Engineering, Train/Test Split and Isolation Forest evaluation
 
 import pandas as pd
 import numpy as np
@@ -34,7 +34,7 @@ def style_ax(ax):
 
 # 1. LOAD DATA
 print("Starting Anomaly Detection Pipeline...")
-df_raw = pd.read_csv('feeds.csv')
+df_raw = pd.read_csv('C:\\Users\\giaka\\Downloads\\feeds.csv')
 df_raw['created_at'] = pd.to_datetime(df_raw['created_at'], utc=True)
 df_raw = df_raw[['created_at','field1','field2']].dropna()
 df_raw = df_raw.sort_values('created_at').reset_index(drop=True)
@@ -57,20 +57,39 @@ df['acceleration']    = df['roc_10min'].diff(1)
 feature_cols = ['roc_10min','roc_30min','rolling_std_30','delta_thermal_gap','acceleration']
 df_m = df.dropna(subset=feature_cols).copy()
 
-# 4. SCALING 
+# 4. TRAIN / TEST SPLIT (Chronological 70/30)
+# =====================================================================
+print("Splitting dataset into Train (70%) and Test (30%) phases...")
+split_idx = int(len(df_m) * 0.7)
+df_train = df_m.iloc[:split_idx].copy()
+df_test  = df_m.iloc[split_idx:].copy()
+split_date = df_test['timestamp'].iloc[0]
+
+print(f"Train Set: {len(df_train)} records (Ends at {split_date})")
+print(f"Test Set : {len(df_test)} records (Starts at {split_date})")
+# =====================================================================
+
+# 5. SCALING (Fit ONLY on Train, Transform on Both to prevent Data Leakage)
 print("Applying scalers...")
 rs = RobustScaler()
 ss = StandardScaler()
-X_robust   = rs.fit_transform(df_m[feature_cols])
-X_standard = ss.fit_transform(df_m[feature_cols])
+
+# Fit only on Train, transform both Train and Test
+X_train_robust = rs.fit_transform(df_train[feature_cols])
+X_test_robust  = rs.transform(df_test[feature_cols])
+X_robust = np.vstack((X_train_robust, X_test_robust)) # Combined for overall scoring/plotting
+
+X_train_standard = ss.fit_transform(df_train[feature_cols])
+X_test_standard  = ss.transform(df_test[feature_cols])
+X_standard = np.vstack((X_train_standard, X_test_standard))
 
 spikes_robust   = (np.abs(X_robust)   > 3).sum(axis=1)
 spikes_standard = (np.abs(X_standard) > 3).sum(axis=1)
 print(f"Spikes preserved (RobustScaler): {(spikes_robust>0).sum()}")
 print(f"Spikes preserved (StandardScaler): {(spikes_standard>0).sum()}")
 
-# 5. ISOLATION FOREST
-print("Training Isolation Forest...")
+# 6. ISOLATION FOREST (Train ONLY on Train Set)
+print("Training Isolation Forest on Train set...")
 iforest = IsolationForest(
     n_estimators   = 200,
     contamination  = 0.04,
@@ -78,20 +97,24 @@ iforest = IsolationForest(
     random_state   = 42,
     n_jobs         = -1
 )
-df_m['anomaly_label'] = iforest.fit_predict(X_robust)
+iforest.fit(X_train_robust) # ΕΚΠΑΙΔΕΥΣΗ ΜΟΝΟ ΣΤΟ TRAIN SET
+
+# Predict on the entire dataset (Train + Test)
+print("Evaluating model on unseen Test data...")
+df_m['anomaly_label'] = iforest.predict(X_robust)
 df_m['anomaly_score'] = iforest.score_samples(X_robust)
 
 n_anom    = (df_m['anomaly_label'] == -1).sum()
 pct_anom  = 100 * n_anom / len(df_m)
 threshold = df_m.loc[df_m['anomaly_label']==-1, 'anomaly_score'].max()
 
-print(f"Detected {n_anom} anomalies.")
+print(f"Detected {n_anom} anomalies across entire dataset.")
 print(f"Score threshold: {threshold:.4f}")
 
 anomalies = df_m[df_m['anomaly_label']==-1].sort_values('anomaly_score')
 mask = df_m['anomaly_label'] == -1
 
-# 6. GENERATE PLOTS
+# 7. GENERATE PLOTS
 print("Generating Figure 1 (Main Time-Series)...")
 fig1, axes = plt.subplots(3, 1, figsize=(16, 12), gridspec_kw={'height_ratios':[3, 1.2, 1.2]})
 fig1.patch.set_facecolor(BG)
@@ -102,10 +125,16 @@ ax.fill_between(df_m['timestamp'], df_m['temp_indoor'], df_m['temp_outdoor'], al
 ax.plot(df_m['timestamp'], df_m['temp_outdoor'], color=OUTDOOR, lw=1.3, alpha=0.85, label='Outdoor Temp', zorder=2)
 ax.plot(df_m['timestamp'], df_m['temp_indoor'], color=INDOOR, lw=1.8, alpha=0.95, label='Indoor Temp', zorder=3)
 ax.scatter(df_m.loc[mask,'timestamp'], df_m.loc[mask,'temp_indoor'], color=ANOMALY, s=70, zorder=5, label=f'Anomaly (n={n_anom})', edgecolors='white', linewidths=0.6)
+
+# TRAIN / TEST SPLIT VISUALIZATION
+ax.axvline(split_date, color=YELLOW, lw=2, ls='--', alpha=0.9, zorder=10)
+ax.text(split_date, df_m['temp_indoor'].max(), '  TEST SET (Unseen) ➡️', color=YELLOW, va='top', ha='left', fontsize=10, fontweight='bold')
+ax.text(split_date, df_m['temp_indoor'].max(), '⬅️ TRAIN SET  ', color=YELLOW, va='top', ha='right', fontsize=10, fontweight='bold')
+
 for t in anomalies.head(5)['timestamp']:
     ax.axvline(x=t, color=ANOMALY, alpha=0.12, lw=1, ls='--')
 ax.set_ylabel('Temperature (C)', color=TEXT, fontsize=11)
-ax.set_title('Temperature Anomaly Detection — Isolation Forest | 10-min Sampling', color=TEXT, fontsize=13, fontweight='bold', pad=10)
+ax.set_title('Temperature Anomaly Detection — Isolation Forest | Train/Test Split', color=TEXT, fontsize=13, fontweight='bold', pad=10)
 ax.legend(loc='upper right', framealpha=0.3, facecolor=PANEL, edgecolor=GRID_C, labelcolor=TEXT, fontsize=9)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m %H:%M'))
 plt.setp(ax.get_xticklabels(), visible=False)
@@ -120,6 +149,7 @@ ax2.axhline(0, color=TEXT, lw=0.5, alpha=0.5)
 roc_std = df_m['roc_10min'].std()
 ax2.axhline(-2*roc_std, color=ANOMALY, lw=0.9, ls=':', alpha=0.55, label=f'+-2sigma ({2*roc_std:.3f})')
 ax2.axhline( 2*roc_std, color=ANOMALY, lw=0.9, ls=':', alpha=0.55)
+ax2.axvline(split_date, color=YELLOW, lw=1.5, ls='--', alpha=0.7)
 ax2.set_ylabel('C / 10 min', color=TEXT, fontsize=10)
 ax2.set_title('Indoor Temperature Rate of Change (10-min step)', color=TEXT, fontsize=10, pad=5)
 ax2.legend(loc='upper right', framealpha=0.2, facecolor=PANEL, edgecolor=GRID_C, labelcolor=TEXT, fontsize=8, ncol=4)
@@ -133,6 +163,7 @@ ax3.plot(df_m['timestamp'], df_m['anomaly_score'], color=PURPLE, lw=0.9, alpha=0
 ax3.fill_between(df_m['timestamp'], df_m['anomaly_score'], threshold, where=(df_m['anomaly_score']<=threshold), color=ANOMALY, alpha=0.28, label='Anomaly zone')
 ax3.axhline(threshold, color=ANOMALY, lw=1.1, ls='--', alpha=0.8, label=f'Threshold = {threshold:.4f}')
 ax3.scatter(df_m.loc[mask,'timestamp'], df_m.loc[mask,'anomaly_score'], color=ANOMALY, s=25, zorder=5, alpha=0.95)
+ax3.axvline(split_date, color=YELLOW, lw=1.5, ls='--', alpha=0.7)
 ax3.set_ylabel('Score', color=TEXT, fontsize=10)
 ax3.set_title('Anomaly Score', color=TEXT, fontsize=10, pad=5)
 ax3.legend(loc='lower right', framealpha=0.2, facecolor=PANEL, edgecolor=GRID_C, labelcolor=TEXT, fontsize=8)
@@ -171,6 +202,7 @@ for col, (fi, fn, cr, cs) in enumerate(zip(feat_idx, feat_names, colors_r, color
     ax2_.plot(df_m['timestamp'].values, xr, color=cr, lw=0.8, alpha=0.8, label='RobustScaler')
     ax2_.plot(df_m['timestamp'].values, xs, color=cs, lw=0.8, alpha=0.6, linestyle='--', label='StandardScaler')
     ax2_.scatter(df_m.loc[mask,'timestamp'].values, xr[mask.values], color=ANOMALY, s=30, zorder=5, label='Anomaly')
+    ax2_.axvline(split_date, color=YELLOW, lw=1, ls='--', alpha=0.5)
     ax2_.axhline( 3, color=ANOMALY, lw=0.9, ls=':', alpha=0.6)
     ax2_.axhline(-3, color=ANOMALY, lw=0.9, ls=':', alpha=0.6)
     ax2_.axhline(0,  color=TEXT, lw=0.5, alpha=0.4)
@@ -216,12 +248,12 @@ ax_feat.set_title('Score vs Feature Magnitude', color=TEXT, fontsize=9)
 ax_feat.legend(fontsize=7, labelcolor=TEXT, facecolor=PANEL, edgecolor=GRID_C, framealpha=0.5)
 
 ax_rob = fig3.add_subplot(gs[0, 2]); style_ax(ax_rob)
-raw_feat = df_m['roc_10min'].values
+raw_feat = df_train['roc_10min'].values # MEDIAN IQR based on train set
 med, q25, q75 = np.median(raw_feat), np.percentile(raw_feat, 25), np.percentile(raw_feat, 75)
 ax_rob.hist(raw_feat, bins=50, color=INDOOR, alpha=0.65, density=True, label='Raw RoC 10min')
 ax_rob.axvline(med, color=GREEN, lw=2, label=f'Median = {med:.4f}')
 ax_rob.fill_betweenx([0, ax_rob.get_ylim()[1] if ax_rob.get_ylim()[1]>0 else 5], q25, q75, color=PURPLE, alpha=0.12, label=f'IQR = {q75-q25:.4f}')
-ax_rob.set_title('RobustScaler Parameters', color=TEXT, fontsize=9)
+ax_rob.set_title('RobustScaler Parameters (Calculated on Train Set)', color=TEXT, fontsize=9)
 ax_rob.legend(fontsize=6.5, labelcolor=TEXT, facecolor=PANEL, edgecolor=GRID_C, framealpha=0.5)
 
 ax_if = fig3.add_subplot(gs[1, 0]); style_ax(ax_if)
@@ -268,6 +300,7 @@ fig4.suptitle('Method Justification', color=TEXT, fontsize=13, fontweight='bold'
 
 ax = axes4[0]; style_ax(ax)
 sc = ax.scatter(df_m['timestamp'], df_m['anomaly_score'], c=df_m['anomaly_score'], cmap='RdYlGn', s=15, alpha=0.8, zorder=3)
+ax.axvline(split_date, color=YELLOW, lw=2, ls='--', alpha=0.9, zorder=10)
 ax.axhline(threshold, color=ANOMALY, lw=1.2, ls='--', label=f'Decision boundary = {threshold:.4f}')
 ax.set_title('Anomaly Score Timeline', color=TEXT, fontsize=9)
 ax.xaxis.set_major_formatter(mdates.DateFormatter('%d/%m'))
@@ -296,7 +329,7 @@ ax.set_title('Algorithm Comparison', color=TEXT, fontsize=9)
 
 ax = axes4[2]; style_ax(ax)
 contams = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10]
-n_anoms_c = [(IsolationForest(n_estimators=200, contamination=c, random_state=42, n_jobs=-1).fit_predict(X_robust)==-1).sum() for c in contams]
+n_anoms_c = [(IsolationForest(n_estimators=200, contamination=c, random_state=42, n_jobs=-1).fit(X_train_robust).predict(X_robust)==-1).sum() for c in contams]
 ax.plot(contams, n_anoms_c, color=INDOOR, lw=2, marker='o')
 ax.axvline(0.04, color=YELLOW, lw=1.5, ls='--', label='Chosen: 0.04')
 ax.set_xlabel('contamination parameter', color=TEXT, fontsize=8)
